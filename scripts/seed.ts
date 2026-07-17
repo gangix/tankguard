@@ -86,6 +86,15 @@ function dateOnly(day: Date): string {
   return day.toISOString().slice(0, 10);
 }
 
+function seededUnit(key: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) / 4294967296;
+}
+
 function createDatabase(): Database.Database {
   mkdirSync(DATA_DIRECTORY, { recursive: true });
   if (existsSync(DATABASE_PATH)) rmSync(DATABASE_PATH);
@@ -121,12 +130,16 @@ function seed(): void {
       insertTruck.run(id, plate, makeModel, capacity, baseline, driverId, createdAt);
 
       let tankLevel = capacity * 0.9;
+      const truckSpeedFactor = 0.9 + seededUnit(`${id}:speed`) * 0.2;
       for (let dayOffset = 0; dayOffset < 30; dayOffset += 1) {
         const day = addDays(startDay, dayOffset);
         const isSiphonEvent = id === "TR-07" && dateOnly(day) === dateOnly(siphonDay);
+        const isNightBeforeSiphonEvent = id === "TR-07" && dateOnly(addDays(day, 1)) === dateOnly(siphonDay);
         const isGhostEvent = id === "TR-08" && dateOnly(day) === dateOnly(ghostDay);
-        const routeEnd = dayOffset % 2 === 0 ? ANKARA : IZMIR;
-        const directionForward = Math.floor(dayOffset / 2) % 2 === 0;
+        const isRestDay = !isSiphonEvent && !isGhostEvent && seededUnit(`${id}:${dayOffset}:rest`) < 0.12;
+        const routePhase = dayOffset + index;
+        const routeEnd = routePhase % 2 === 0 ? ANKARA : IZMIR;
+        const directionForward = Math.floor(routePhase / 2) % 2 === 0;
         const routeStart = directionForward ? ISTANBUL_TUZLA : routeEnd;
         const routeFinish = directionForward ? routeEnd : ISTANBUL_TUZLA;
 
@@ -139,8 +152,10 @@ function seed(): void {
         }
 
         const efficiencyFactor = id === "TR-06" && dayOffset >= 16 ? 1.15 : 1;
-        const expectedDailyConsumption = baseline * efficiencyFactor * 6;
-        if (tankLevel < expectedDailyConsumption + capacity * 0.15) {
+        const dailySpeedFactor = 0.94 + seededUnit(`${id}:${dayOffset}:speed`) * 0.12;
+        const drivingSpeedKph = 72 * truckSpeedFactor * dailySpeedFactor;
+        const expectedDailyConsumption = isRestDay ? 0 : (baseline * efficiencyFactor * drivingSpeedKph * 8) / 100;
+        if (!isRestDay && tankLevel < expectedDailyConsumption + capacity * 0.15) {
           const liters = Number((capacity - tankLevel).toFixed(1));
           const station = stationAt(routeStart);
           insertFuel.run(
@@ -150,22 +165,25 @@ function seed(): void {
           tankLevel = capacity;
         }
 
-        const consumptionPerPing = (baseline * efficiencyFactor * 75 * (5 / 60)) / 100;
-        for (let minutes = 0; minutes <= 8 * 60; minutes += 5) {
-          const hour = 8 + Math.floor(minutes / 60);
-          const minute = minutes % 60;
-          const progress = minutes / (8 * 60);
-          let point = interpolate(routeStart, routeFinish, progress);
-          if (isGhostEvent && hour === 12 && minute === 0) point = SAKARYA;
-          const timestamp = localTurkeyToUtcIso(day, hour, minute);
-          insertGps.run(id, timestamp, point.latitude, point.longitude, 75, 1);
-          tankLevel = Math.max(0, tankLevel - consumptionPerPing);
-          insertTank.run(id, timestamp, clamp(tankLevel, 0, capacity).toFixed(1));
+        if (!isRestDay) {
+          const consumptionPerPing = (baseline * efficiencyFactor * drivingSpeedKph * (5 / 60)) / 100;
+          for (let minutes = 0; minutes <= 8 * 60; minutes += 5) {
+            const hour = 8 + Math.floor(minutes / 60);
+            const minute = minutes % 60;
+            const progress = minutes / (8 * 60);
+            let point = interpolate(routeStart, routeFinish, progress);
+            if (isGhostEvent && hour === 12 && minute === 0) point = SAKARYA;
+            const timestamp = localTurkeyToUtcIso(day, hour, minute);
+            insertGps.run(id, timestamp, point.latitude, point.longitude, drivingSpeedKph, 1);
+            tankLevel = Math.max(0, tankLevel - consumptionPerPing);
+            insertTank.run(id, timestamp, clamp(tankLevel, 0, capacity).toFixed(1));
+          }
         }
 
         for (let hour = 17; hour < 24; hour += 1) {
           const timestamp = localTurkeyToUtcIso(day, hour);
-          insertGps.run(id, timestamp, routeFinish.latitude, routeFinish.longitude, 0, 0);
+          const parkedPoint = isNightBeforeSiphonEvent ? BOLU_REST_STOP : isRestDay ? routeStart : routeFinish;
+          insertGps.run(id, timestamp, parkedPoint.latitude, parkedPoint.longitude, 0, 0);
           insertTank.run(id, timestamp, clamp(tankLevel, 0, capacity).toFixed(1));
         }
 

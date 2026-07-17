@@ -86,6 +86,11 @@ CREATE TABLE ai_verdicts (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE ai_verdict_jobs (
+  anomaly_id TEXT PRIMARY KEY REFERENCES anomalies(id),
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX idx_gps_pings_truck_recorded_at ON gps_pings(truck_id, recorded_at);
 CREATE INDEX idx_tank_readings_truck_recorded_at ON tank_readings(truck_id, recorded_at);
 CREATE INDEX idx_fuel_transactions_truck_occurred_at ON fuel_transactions(truck_id, occurred_at);

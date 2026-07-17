@@ -41,7 +41,8 @@ yarn-error.log*
 next-env.d.ts
 
 # Local seed artifacts
-data/tankguard.db
+# The pre-seeded database is intentionally versioned for the read-only Vercel demo.
+!data/tankguard.db
 data/ground_truth.json
 
 .idea/

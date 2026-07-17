@@ -1,0 +1,17 @@
+"use client";
+
+import dynamic from "next/dynamic";
+import Link from "next/link";
+import type { DashboardSnapshot } from "@/lib/dashboard/queries";
+import FleetQueryBox from "./fleet-query-box";
+
+const FleetMap = dynamic(() => import("./fleet-map"), { ssr: false, loading: () => <div className="h-full animate-pulse rounded-2xl bg-slate-800" /> });
+
+export default function DashboardClient({ snapshot }: { snapshot: DashboardSnapshot }) {
+  const numberFormatter = new Intl.NumberFormat("en-GB");
+  return <main className="min-h-screen bg-slate-950 px-5 py-5 text-slate-100"><div className="mx-auto max-w-[1500px]">
+    <header className="mb-4 flex items-end justify-between"><div><p className="text-xs uppercase tracking-[0.25em] text-sky-400">TankGuard</p><h1 className="text-3xl font-semibold">Fleet fuel intelligence</h1></div><div className="hidden gap-5 text-right text-sm text-slate-400 sm:flex"><p><b className="text-slate-100">{snapshot.totals.truck_count}</b> trucks</p><p><b className="text-rose-300">{snapshot.totals.flagged_count}</b> flagged</p><p><b className="text-slate-100">₺{numberFormatter.format(snapshot.totals.fuel_cost_try)}</b> fuel / 30d</p></div></header>
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1.8fr)_minmax(310px,0.8fr)]"><section className="h-[45vh] min-h-[340px] overflow-hidden rounded-2xl border border-slate-800"><FleetMap trucks={snapshot.trucks}/></section><aside className="space-y-4"><FleetQueryBox/><section className="rounded-2xl border border-slate-800 bg-slate-900 p-4"><p className="text-sm font-medium">Documents needing attention</p><div className="mt-2 space-y-2">{snapshot.documents.map((document) => <div key={document.id} className="flex justify-between gap-3 text-sm"><span><b className={document.state === "expired" ? "text-rose-300" : "text-amber-300"}>{document.state === "expired" ? "Expired" : "Due soon"}</b> · {document.document_type}</span><span className="text-slate-400">{document.owner_label}</span></div>)}</div></section><p className="px-1 text-xs text-slate-500">Red map markers indicate detected events. Metrics cover the last 30 days.</p></aside></div>
+    <section className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{snapshot.trucks.map((truck) => <Link key={truck.id} href={`/trucks/${truck.id}`} className={`rounded-xl border p-4 transition hover:-translate-y-0.5 ${truck.anomalies.length ? "border-rose-500/40 bg-rose-500/5" : "border-slate-800 bg-slate-900"}`}><div className="flex justify-between"><div><h2 className="font-semibold">{truck.plate} <span className="ml-1 rounded bg-slate-800 px-1.5 py-0.5 text-xs font-normal text-slate-500">{truck.id}</span></h2><p className="text-xs text-slate-500">{truck.make_model}</p></div><span className={truck.anomalies.length ? "text-xs text-rose-300" : "text-xs text-emerald-300"}>{truck.anomalies.length ? `${truck.anomalies.length} event` : "Clear"}</span></div><div className="mt-3 grid grid-cols-3 gap-2 text-xs text-slate-400"><p><b className="block text-sm text-slate-100">{numberFormatter.format(truck.kilometers)}</b>km / 30d</p><p><b className="block text-sm text-slate-100">{truck.l_per_100km}</b>L/100</p><p><b className="block text-sm text-slate-100">₺{Math.round(truck.fuel_cost_try / 1000)}k</b>fuel</p></div>{truck.anomalies.length > 0 && <p className="mt-2 truncate text-xs text-rose-200">{truck.anomalies[0].display_name}</p>}</Link>)}</section>
+  </div></main>;
+}

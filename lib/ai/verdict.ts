@@ -29,12 +29,27 @@ type Verdict = { classification: "requires_investigation" | "likely_data_or_sens
 
 type GpsPoint = { at_utc: string; lat: number; lon: number; speed_kph: number; ignition_on: number };
 
+const knownLocations = [
+  { label: "Bolu Dağı rest stop", lat: 40.739, lon: 31.611 },
+  { label: "Tuzla depot", lat: 40.816, lon: 29.3 },
+  { label: "Ankara terminal", lat: 39.933, lon: 32.86 },
+  { label: "İzmir depot", lat: 38.423, lon: 27.142 },
+] as const;
+
 function distanceMeters(a: GpsPoint, b: GpsPoint): number {
   const radians = (value: number) => (value * Math.PI) / 180;
   const latDelta = radians(b.lat - a.lat);
   const lonDelta = radians(b.lon - a.lon);
   const value = Math.sin(latDelta / 2) ** 2 + Math.cos(radians(a.lat)) * Math.cos(radians(b.lat)) * Math.sin(lonDelta / 2) ** 2;
   return 6371_000 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+}
+
+function knownLocationLabel(position: GpsPoint | undefined): string {
+  if (!position) return "event position";
+  const nearest = knownLocations
+    .map((location) => ({ location, distance: distanceMeters(position, { at_utc: position.at_utc, lat: location.lat, lon: location.lon, speed_kph: 0, ignition_on: 0 }) }))
+    .sort((a, b) => a.distance - b.distance)[0];
+  return nearest && nearest.distance <= 2_000 ? nearest.location.label : "event position";
 }
 
 export function buildVerdictContext(anomalyId: string): Record<string, unknown> {
@@ -52,7 +67,7 @@ export function buildVerdictContext(anomalyId: string): Record<string, unknown> 
     const eventPosition = gps.reduce<GpsPoint | undefined>((nearest, point) => !nearest || Math.abs(new Date(point.at_utc).getTime() - new Date(String(anomaly.occurred_at)).getTime()) < Math.abs(new Date(nearest.at_utc).getTime() - new Date(String(anomaly.occurred_at)).getTime()) ? point : nearest, undefined);
     const parkedPoints = eventPosition ? gps.filter((point) => point.ignition_on === 0 && point.speed_kph <= 2 && distanceMeters(point, eventPosition) <= 100) : [];
     const gpsSummary = anomaly.rule_code === "parked_fuel_loss"
-      ? { scope: "parked interval around anomaly", state: "parked", location_label: "event position", sample_count: parkedPoints.length, stationary_radius_meters: eventPosition ? Number(Math.max(0, ...parkedPoints.map((point) => distanceMeters(point, eventPosition))).toFixed(1)) : 0, points: sample(parkedPoints, 24) }
+      ? { scope: "parked interval around anomaly", state: "parked", location_label: knownLocationLabel(eventPosition), sample_count: parkedPoints.length, stationary_radius_meters: eventPosition ? Number(Math.max(0, ...parkedPoints.map((point) => distanceMeters(point, eventPosition))).toFixed(1)) : 0, points: sample(parkedPoints, 24) }
       : { scope: "full anomaly window", sample_count: gps.length, points: sample(gps, 24) };
     return {
       task: "Investigate this deterministic fleet anomaly and return the required verdict.",
@@ -65,25 +80,84 @@ export function buildVerdictContext(anomalyId: string): Record<string, unknown> 
   } finally { db.close(); }
 }
 
-export async function investigateAnomaly(anomalyId: string): Promise<Verdict> {
+function cachedVerdict(anomalyId: string): Verdict | undefined {
   const db = openDatabase();
   try {
-    const cached = db.prepare("SELECT classification, confidence, explanation, recommended_action FROM ai_verdicts WHERE anomaly_id = ?").get(anomalyId) as Verdict | undefined;
-    if (cached) return cached;
+    return db.prepare("SELECT classification, confidence, explanation, recommended_action FROM ai_verdicts WHERE anomaly_id = ?").get(anomalyId) as Verdict | undefined;
   } finally { db.close(); }
-  if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is required to investigate anomalies.");
-  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const response = await client.responses.create({
-    model: "gpt-5.6",
-    input: [{ role: "system", content: VERDICT_SYSTEM_PROMPT }, { role: "user", content: JSON.stringify(buildVerdictContext(anomalyId)) }],
-    text: { format: { type: "json_schema", name: "fleet_investigation", strict: true, schema: verdictSchema } },
-  });
-  const verdict = JSON.parse(response.output_text) as Verdict;
-  const writeDb = openDatabase();
+}
+
+const wait = (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+const isReadOnlyDatabaseError = (error: unknown) => error instanceof Error && ("code" in error && error.code === "SQLITE_READONLY" || /readonly database/i.test(error.message));
+
+/**
+ * Claims one investigation per anomaly across the web route and standalone scripts.
+ * SQLite's unique key makes the claim durable while the model request is in flight.
+ */
+function claimInvestigation(anomalyId: string): "claimed" | "waiting" | "read_only" {
+  const db = openDatabase();
   try {
-    writeDb.prepare("INSERT INTO ai_verdicts (id, anomaly_id, classification, confidence, explanation, recommended_action, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
-      createHash("sha256").update(anomalyId).digest("hex").slice(0, 24), anomalyId, verdict.classification, verdict.confidence, verdict.explanation, verdict.recommended_action, "gpt-5.6", new Date().toISOString(),
-    );
-  } finally { writeDb.close(); }
-  return verdict;
+    db.exec("CREATE TABLE IF NOT EXISTS ai_verdict_jobs (anomaly_id TEXT PRIMARY KEY REFERENCES anomalies(id), created_at TEXT NOT NULL)");
+    db.prepare("DELETE FROM ai_verdict_jobs WHERE created_at < ?").run(new Date(Date.now() - 5 * 60_000).toISOString());
+    return db.prepare("INSERT OR IGNORE INTO ai_verdict_jobs (anomaly_id, created_at) VALUES (?, ?)").run(anomalyId, new Date().toISOString()).changes === 1 ? "claimed" : "waiting";
+  } catch (error) {
+    if (isReadOnlyDatabaseError(error)) return "read_only";
+    throw error;
+  } finally { db.close(); }
+}
+
+function releaseInvestigation(anomalyId: string): void {
+  const db = openDatabase();
+  try { db.prepare("DELETE FROM ai_verdict_jobs WHERE anomaly_id = ?").run(anomalyId); }
+  catch (error) { if (!isReadOnlyDatabaseError(error)) throw error; }
+  finally { db.close(); }
+}
+
+async function waitForVerdict(anomalyId: string): Promise<Verdict> {
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    const cached = cachedVerdict(anomalyId);
+    if (cached) return cached;
+    await wait(250);
+  }
+  throw new Error("AI investigation is still in progress. Please try again shortly.");
+}
+
+export async function investigateAnomaly(anomalyId: string): Promise<Verdict> {
+  const cached = cachedVerdict(anomalyId);
+  if (cached) return cached;
+  const claim = claimInvestigation(anomalyId);
+  if (claim === "waiting") return waitForVerdict(anomalyId);
+  if (claim === "read_only") {
+    const appearedMeanwhile = cachedVerdict(anomalyId);
+    if (appearedMeanwhile) return appearedMeanwhile;
+    throw new Error("AI investigation is unavailable because this deployment uses a read-only verdict cache.");
+  }
+
+  try {
+    // A verdict may have been written between the initial read and lock claim.
+    const appearedMeanwhile = cachedVerdict(anomalyId);
+    if (appearedMeanwhile) return appearedMeanwhile;
+    if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is required to investigate anomalies.");
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const response = await client.responses.create({
+      model: "gpt-5.6",
+      input: [{ role: "system", content: VERDICT_SYSTEM_PROMPT }, { role: "user", content: JSON.stringify(buildVerdictContext(anomalyId)) }],
+      text: { format: { type: "json_schema", name: "fleet_investigation", strict: true, schema: verdictSchema } },
+    });
+    const verdict = JSON.parse(response.output_text) as Verdict;
+    const writeDb = openDatabase();
+    try {
+      writeDb.prepare("INSERT OR IGNORE INTO ai_verdicts (id, anomaly_id, classification, confidence, explanation, recommended_action, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+        createHash("sha256").update(anomalyId).digest("hex").slice(0, 24), anomalyId, verdict.classification, verdict.confidence, verdict.explanation, verdict.recommended_action, "gpt-5.6", new Date().toISOString(),
+      );
+      return writeDb.prepare("SELECT classification, confidence, explanation, recommended_action FROM ai_verdicts WHERE anomaly_id = ?").get(anomalyId) as Verdict;
+    } catch (error) {
+      // Demo deployments ship a complete cache on Vercel's read-only filesystem.
+      // If a write becomes unavailable after a model response, still return it to this request.
+      if (isReadOnlyDatabaseError(error)) return verdict;
+      throw error;
+    } finally { writeDb.close(); }
+  } finally {
+    releaseInvestigation(anomalyId);
+  }
 }

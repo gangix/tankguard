@@ -50,7 +50,7 @@ function detectParkedFuelLoss(truck: Truck, gps: GpsPing[], tanks: TankReading[]
         const occurredAt = current.recorded_at;
         candidates.push(createCandidate({
           truckId: truck.id, ruleCode: "parked_fuel_loss", displayName: "Unexplained fuel loss while parked", severity: loss >= 50 ? "high" : "medium", occurredAt,
-          windowStart: toIso(toMs(occurredAt) - 6 * HOUR), windowEnd: toIso(toMs(occurredAt) + 6 * HOUR),
+          windowStart: toIso(toMs(occurredAt) - 6 * HOUR), windowEnd: toIso(toMs(occurredAt) + 4 * HOUR),
           evidence: { observed_drop_liters: Number(loss.toFixed(1)), threshold_liters: 25, ignition_off: true, stationary_distance_meters: Number((distanceKm(previousGps, currentGps) * 1000).toFixed(1)), readings: [previous, current] },
         }));
       }

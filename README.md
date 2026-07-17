@@ -52,3 +52,18 @@ The application describes events, never accuses people. Assigned drivers appear 
 ## Data note
 
 All data is synthetic. Seed timestamps model Turkey local time (UTC+3) and are stored as ISO 8601 UTC strings in SQLite.
+
+## Deploy to Vercel
+
+The repository includes `data/tankguard.db`, pre-seeded and pre-investigated with all three verdicts. It is deliberately committed for the demo: Vercel's serverless filesystem is read-only at runtime, so cached verdicts render without a write or a live investigation call.
+
+1. Commit the included database along with the application changes, then import the repository into Vercel (or run `vercel` from the repository root).
+2. Select the Next.js framework preset. Use the default install command and `npm run build`; no custom build command is required.
+3. Add `OPENAI_API_KEY` in **Project Settings → Environment Variables** for Production and Preview. The pre-cached anomaly cards work without it, but the dashboard's natural-language query feature requires it.
+4. Deploy. `next.config.ts` explicitly traces `data/tankguard.db` into each server-rendered route and API function.
+
+Do not run `npm run seed`, `npm run detect`, or `npm run investigate` in the Vercel build command: they mutate the SQLite database. Regenerate and investigate the database locally, then commit the updated `data/tankguard.db` before a new deployment.
+
+## Production notes
+
+This is a hackathon build, deliberately simplified for evaluation: SQLite ships with the deployment (verdicts are pre-cached, so the live instance is effectively read-only), detection runs as batch scripts, and there is no authentication or multi-tenancy. A production deployment would separate these concerns: a hosted database such as Postgres for fleet-scale telemetry, detection as a scheduled job triggered on data ingestion with investigation following automatically, streamed GPS and fuel ingestion instead of seeded data, and per-operator authentication. The detection rules, evidence bundling, and verdict pipeline are architected to carry over unchanged.
