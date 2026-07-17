@@ -1,6 +1,12 @@
 # TankGuard
 
-Fleet fuel intelligence for seeded Turkish trucking data. Deterministic rules flag telemetry discrepancies; GPT-5.6 produces neutral investigation summaries and suggested next steps.
+Fleet fuel intelligence for trucking operators: deterministic rules cross-reference GPS and fuel telemetry to flag discrepancies; GPT-5.6 investigates each event and answers fleet questions in plain language. Demo runs on realistic seeded data.
+
+**Live demo:** https://tankguard-ten.vercel.app
+
+![TankGuard fleet dashboard](docs/dashboard.png)
+
+![TR-07 investigation detail](docs/tr-07-detail.png)
 
 ## Setup
 
@@ -48,6 +54,23 @@ Open `http://localhost:3000`, then select a truck with a detected event.
 ## Product language
 
 The application describes events, never accuses people. Assigned drivers appear only as operational context. GPT-5.6 verdicts use neutral language, consider alternatives such as sensor or timing issues, and recommend investigation steps rather than disciplinary action.
+
+## How Codex and GPT-5.6 were used
+
+### Built with Codex
+
+TankGuard was built through a spec-driven workflow: `PROJECT_SPEC.md` defined the product, Codex proposed each milestone's design, implementation followed explicit approval, and each stage ended with data and build verification.
+
+- Codex proposed the SQLite schema and detection design, then incorporated the review refinements: explicit anomaly windows, polymorphic document ownership, and the benign `no_issue_identified` verdict classification.
+- It caught a seed-data flaw that could have created Rule B false positives, then updated normal refuels to use location-appropriate stations rather than only plausible coordinates.
+- It kept verdicts truthful: when an API key was unavailable, it did not fabricate an investigation and instead preserved the cache/setup fallback.
+- It diagnosed the React Strict Mode race that left automatic investigations stuck on their loading state, then made both the client update and the SQLite-backed investigation lock idempotent.
+
+### GPT-5.6 at runtime
+
+GPT-5.6 powers two runtime workflows. The anomaly verdict pipeline uses the Responses API with structured outputs and a compact evidence bundle of telemetry, transactions, truck context, and deterministic findings. Its system prompt requires neutral, non-accusatory language, alternative explanations, and recommended investigation steps.
+
+The dashboard query box uses GPT-5.6 function calling over three read-only tools: `get_fleet_stats`, `get_truck_detail`, and `list_anomalies`. The model never receives direct SQL access, and answers in the language of the question. In evaluation runs, its confidence calibration tracked evidence strength (approximately 0.99, 0.96, and 0.90), rather than treating every detected event as equally certain.
 
 ## Data note
 
