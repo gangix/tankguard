@@ -1,36 +1,53 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# TankGuard
 
-## Getting Started
+Fleet fuel intelligence for seeded Turkish trucking data. Deterministic rules flag telemetry discrepancies; GPT-5.6 produces neutral investigation summaries and suggested next steps.
 
-First, run the development server:
+## Setup
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+1. Install dependencies:
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+   ```bash
+   npm install
+   ```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+2. Create `.env.local` in the repository root:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+   ```dotenv
+   OPENAI_API_KEY=your_api_key_here
+   ```
 
-## Learn More
+   Next.js automatically loads this file for the web app and API routes. The standalone `npm run investigate` script explicitly loads the same `.env.local` file through `dotenv`.
 
-To learn more about Next.js, take a look at the following resources:
+3. Generate deterministic source data and detect discrepancies:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+   ```bash
+   npm run seed
+   npm run detect
+   ```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+4. Generate and cache GPT-5.6 verdicts, then start the app:
 
-## Deploy on Vercel
+   ```bash
+   npm run investigate
+   npm run dev
+   ```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Open `http://localhost:3000`, then select a truck with a detected event.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| `npm run seed` | Rebuild the SQLite database and synthetic source data. |
+| `npm run detect` | Run the three deterministic rules and persist event candidates. |
+| `npm run investigate` | Generate/cache verdicts for all uncached candidates. |
+| `npm run investigate <anomaly-id>` | Generate/cache one verdict. |
+| `npm run dev` | Run the Next.js application. |
+
+## Product language
+
+The application describes events, never accuses people. Assigned drivers appear only as operational context. GPT-5.6 verdicts use neutral language, consider alternatives such as sensor or timing issues, and recommend investigation steps rather than disciplinary action.
+
+## Data note
+
+All data is synthetic. Seed timestamps model Turkey local time (UTC+3) and are stored as ISO 8601 UTC strings in SQLite.

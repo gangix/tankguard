@@ -1,0 +1,74 @@
+import OpenAI from "openai";
+import { createHash } from "node:crypto";
+import { openDatabase } from "@/lib/db/client";
+
+export const VERDICT_SYSTEM_PROMPT = `You are TankGuard’s fleet-operations investigation assistant.
+
+Assess only the supplied telemetry and transaction data. Describe observed discrepancies as events, not as proof that any person acted improperly.
+
+Use neutral, non-accusatory language. Never state or imply that a driver, employee, or other identified person committed theft, fraud, or misconduct. The assigned driver is context metadata only and must never be the subject of a conclusion.
+
+State uncertainty proportionately. Consider plausible alternatives, including sensor calibration error, delayed telemetry, transaction timing or geocoding error, a third party, and legitimate operational explanations.
+
+Use the anomaly’s supplied neutral display name exactly when referring to its type. Recommended actions must be practical investigation steps, such as reviewing receipts or CCTV, checking GPS and fuel-card records, inspecting the vehicle, or scheduling sensor calibration. Do not recommend disciplinary action.
+
+Return only JSON matching the provided schema. Do not include markdown or extra keys.`;
+
+const verdictSchema = {
+  type: "object", additionalProperties: false,
+  required: ["classification", "confidence", "explanation", "recommended_action"],
+  properties: {
+    classification: { type: "string", enum: ["requires_investigation", "likely_data_or_sensor_issue", "insufficient_evidence", "no_issue_identified"] },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    explanation: { type: "string", minLength: 1, maxLength: 900 },
+    recommended_action: { type: "string", minLength: 1, maxLength: 500 },
+  },
+} as const;
+
+type Verdict = { classification: "requires_investigation" | "likely_data_or_sensor_issue" | "insufficient_evidence" | "no_issue_identified"; confidence: number; explanation: string; recommended_action: string };
+
+export function buildVerdictContext(anomalyId: string): Record<string, unknown> {
+  const db = openDatabase();
+  try {
+    const anomaly = db.prepare(`SELECT a.*, t.plate, t.make_model, t.tank_capacity_liters, t.baseline_l_per_100km, d.full_name AS assigned_driver
+      FROM anomalies a JOIN trucks t ON t.id = a.truck_id JOIN drivers d ON d.id = t.assigned_driver_id WHERE a.id = ?`).get(anomalyId) as Record<string, unknown> | undefined;
+    if (!anomaly) throw new Error(`Anomaly ${anomalyId} was not found.`);
+    const start = new Date(new Date(String(anomaly.window_start)).getTime() - 6 * 60 * 60 * 1000).toISOString();
+    const end = new Date(new Date(String(anomaly.window_end)).getTime() + 6 * 60 * 60 * 1000).toISOString();
+    const tankReadings = db.prepare("SELECT recorded_at AS at_utc, liters FROM tank_readings WHERE truck_id = ? AND recorded_at BETWEEN ? AND ? ORDER BY recorded_at").all(anomaly.truck_id, start, end) as Array<Record<string, unknown>>;
+    const gps = db.prepare("SELECT recorded_at AS at_utc, latitude AS lat, longitude AS lon, speed_kph, ignition_on FROM gps_pings WHERE truck_id = ? AND recorded_at BETWEEN ? AND ? ORDER BY recorded_at").all(anomaly.truck_id, start, end) as Array<Record<string, unknown>>;
+    const transactions = db.prepare("SELECT occurred_at AS at_utc, station_name, liters, total_cost_try FROM fuel_transactions WHERE truck_id = ? AND occurred_at BETWEEN ? AND ? ORDER BY occurred_at").all(anomaly.truck_id, start, end);
+    const sample = <T>(items: T[], max: number) => items.length <= max ? items : items.filter((_, index) => index % Math.ceil(items.length / max) === 0);
+    return {
+      task: "Investigate this deterministic fleet anomaly and return the required verdict.",
+      anomaly: { id: anomaly.id, display_name: anomaly.display_name, rule: anomaly.rule_code, severity: anomaly.severity, occurred_at_utc: anomaly.occurred_at, window_start_utc: anomaly.window_start, window_end_utc: anomaly.window_end, detector_findings: JSON.parse(String(anomaly.evidence_json)) },
+      truck: { id: anomaly.truck_id, plate: anomaly.plate, make_model: anomaly.make_model, tank_capacity_liters: anomaly.tank_capacity_liters, baseline_l_per_100km: anomaly.baseline_l_per_100km, assigned_driver: { name: anomaly.assigned_driver, context_only: true } },
+      gps_summary: { sample_count: gps.length, points: sample(gps, 24) },
+      tank_readings: sample(tankReadings, 32),
+      nearby_transactions: transactions,
+    };
+  } finally { db.close(); }
+}
+
+export async function investigateAnomaly(anomalyId: string): Promise<Verdict> {
+  const db = openDatabase();
+  try {
+    const cached = db.prepare("SELECT classification, confidence, explanation, recommended_action FROM ai_verdicts WHERE anomaly_id = ?").get(anomalyId) as Verdict | undefined;
+    if (cached) return cached;
+  } finally { db.close(); }
+  if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is required to investigate anomalies.");
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const response = await client.responses.create({
+    model: "gpt-5.6",
+    input: [{ role: "system", content: VERDICT_SYSTEM_PROMPT }, { role: "user", content: JSON.stringify(buildVerdictContext(anomalyId)) }],
+    text: { format: { type: "json_schema", name: "fleet_investigation", strict: true, schema: verdictSchema } },
+  });
+  const verdict = JSON.parse(response.output_text) as Verdict;
+  const writeDb = openDatabase();
+  try {
+    writeDb.prepare("INSERT INTO ai_verdicts (id, anomaly_id, classification, confidence, explanation, recommended_action, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+      createHash("sha256").update(anomalyId).digest("hex").slice(0, 24), anomalyId, verdict.classification, verdict.confidence, verdict.explanation, verdict.recommended_action, "gpt-5.6", new Date().toISOString(),
+    );
+  } finally { writeDb.close(); }
+  return verdict;
+}

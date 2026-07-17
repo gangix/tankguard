@@ -34,6 +34,16 @@ const BOLU_REST_STOP: Coordinate = { latitude: 40.739, longitude: 31.611 };
 const SAKARYA: Coordinate = { latitude: 40.756, longitude: 30.378 };
 const ANKARA_NORTH_STATION: Coordinate = { latitude: 40.246, longitude: 31.903 };
 
+function stationAt(point: Coordinate): { name: string; point: Coordinate } {
+  if (point.latitude === ISTANBUL_TUZLA.latitude && point.longitude === ISTANBUL_TUZLA.longitude) {
+    return { name: "Tuzla Lojistik İstasyonu", point: ISTANBUL_TUZLA };
+  }
+  if (point.latitude === ANKARA.latitude && point.longitude === ANKARA.longitude) {
+    return { name: "Ankara Terminal İstasyonu", point: ANKARA };
+  }
+  return { name: "İzmir Bursa Yolu İstasyonu", point: IZMIR };
+}
+
 function localTurkeyToUtcIso(day: Date, hour: number, minute = 0): string {
   return new Date(
     Date.UTC(
@@ -132,9 +142,10 @@ function seed(): void {
         const expectedDailyConsumption = baseline * efficiencyFactor * 6;
         if (tankLevel < expectedDailyConsumption + capacity * 0.15) {
           const liters = Number((capacity - tankLevel).toFixed(1));
+          const station = stationAt(routeStart);
           insertFuel.run(
-            `fuel-${id}-${dayOffset}`, id, localTurkeyToUtcIso(day, 7, 55), "Tuzla Lojistik İstasyonu",
-            ISTANBUL_TUZLA.latitude, ISTANBUL_TUZLA.longitude, liters, 42.5, Number((liters * 42.5).toFixed(2)),
+            `fuel-${id}-${dayOffset}`, id, localTurkeyToUtcIso(day, 7, 55), station.name,
+            station.point.latitude, station.point.longitude, liters, 42.5, Number((liters * 42.5).toFixed(2)),
           );
           tankLevel = capacity;
         }
