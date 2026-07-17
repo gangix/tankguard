@@ -42,6 +42,7 @@ Open `http://localhost:3000`, then select a truck with a detected event.
 | `npm run detect` | Run the three deterministic rules and persist event candidates. |
 | `npm run investigate` | Generate/cache verdicts for all uncached candidates. |
 | `npm run investigate <anomaly-id>` | Generate/cache one verdict. |
+| `npm run investigate -- --truck TR-07 --refresh` | Regenerate one truck's cached verdict after a context or prompt change. |
 | `npm run dev` | Run the Next.js application. |
 
 ## Product language

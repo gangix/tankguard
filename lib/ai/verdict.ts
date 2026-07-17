@@ -27,23 +27,38 @@ const verdictSchema = {
 
 type Verdict = { classification: "requires_investigation" | "likely_data_or_sensor_issue" | "insufficient_evidence" | "no_issue_identified"; confidence: number; explanation: string; recommended_action: string };
 
+type GpsPoint = { at_utc: string; lat: number; lon: number; speed_kph: number; ignition_on: number };
+
+function distanceMeters(a: GpsPoint, b: GpsPoint): number {
+  const radians = (value: number) => (value * Math.PI) / 180;
+  const latDelta = radians(b.lat - a.lat);
+  const lonDelta = radians(b.lon - a.lon);
+  const value = Math.sin(latDelta / 2) ** 2 + Math.cos(radians(a.lat)) * Math.cos(radians(b.lat)) * Math.sin(lonDelta / 2) ** 2;
+  return 6371_000 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+}
+
 export function buildVerdictContext(anomalyId: string): Record<string, unknown> {
   const db = openDatabase();
   try {
     const anomaly = db.prepare(`SELECT a.*, t.plate, t.make_model, t.tank_capacity_liters, t.baseline_l_per_100km, d.full_name AS assigned_driver
       FROM anomalies a JOIN trucks t ON t.id = a.truck_id JOIN drivers d ON d.id = t.assigned_driver_id WHERE a.id = ?`).get(anomalyId) as Record<string, unknown> | undefined;
     if (!anomaly) throw new Error(`Anomaly ${anomalyId} was not found.`);
-    const start = new Date(new Date(String(anomaly.window_start)).getTime() - 6 * 60 * 60 * 1000).toISOString();
-    const end = new Date(new Date(String(anomaly.window_end)).getTime() + 6 * 60 * 60 * 1000).toISOString();
+    const start = String(anomaly.window_start);
+    const end = String(anomaly.window_end);
     const tankReadings = db.prepare("SELECT recorded_at AS at_utc, liters FROM tank_readings WHERE truck_id = ? AND recorded_at BETWEEN ? AND ? ORDER BY recorded_at").all(anomaly.truck_id, start, end) as Array<Record<string, unknown>>;
-    const gps = db.prepare("SELECT recorded_at AS at_utc, latitude AS lat, longitude AS lon, speed_kph, ignition_on FROM gps_pings WHERE truck_id = ? AND recorded_at BETWEEN ? AND ? ORDER BY recorded_at").all(anomaly.truck_id, start, end) as Array<Record<string, unknown>>;
+    const gps = db.prepare("SELECT recorded_at AS at_utc, latitude AS lat, longitude AS lon, speed_kph, ignition_on FROM gps_pings WHERE truck_id = ? AND recorded_at BETWEEN ? AND ? ORDER BY recorded_at").all(anomaly.truck_id, start, end) as GpsPoint[];
     const transactions = db.prepare("SELECT occurred_at AS at_utc, station_name, liters, total_cost_try FROM fuel_transactions WHERE truck_id = ? AND occurred_at BETWEEN ? AND ? ORDER BY occurred_at").all(anomaly.truck_id, start, end);
     const sample = <T>(items: T[], max: number) => items.length <= max ? items : items.filter((_, index) => index % Math.ceil(items.length / max) === 0);
+    const eventPosition = gps.reduce<GpsPoint | undefined>((nearest, point) => !nearest || Math.abs(new Date(point.at_utc).getTime() - new Date(String(anomaly.occurred_at)).getTime()) < Math.abs(new Date(nearest.at_utc).getTime() - new Date(String(anomaly.occurred_at)).getTime()) ? point : nearest, undefined);
+    const parkedPoints = eventPosition ? gps.filter((point) => point.ignition_on === 0 && point.speed_kph <= 2 && distanceMeters(point, eventPosition) <= 100) : [];
+    const gpsSummary = anomaly.rule_code === "parked_fuel_loss"
+      ? { scope: "parked interval around anomaly", state: "parked", location_label: "event position", sample_count: parkedPoints.length, stationary_radius_meters: eventPosition ? Number(Math.max(0, ...parkedPoints.map((point) => distanceMeters(point, eventPosition))).toFixed(1)) : 0, points: sample(parkedPoints, 24) }
+      : { scope: "full anomaly window", sample_count: gps.length, points: sample(gps, 24) };
     return {
       task: "Investigate this deterministic fleet anomaly and return the required verdict.",
       anomaly: { id: anomaly.id, display_name: anomaly.display_name, rule: anomaly.rule_code, severity: anomaly.severity, occurred_at_utc: anomaly.occurred_at, window_start_utc: anomaly.window_start, window_end_utc: anomaly.window_end, detector_findings: JSON.parse(String(anomaly.evidence_json)) },
       truck: { id: anomaly.truck_id, plate: anomaly.plate, make_model: anomaly.make_model, tank_capacity_liters: anomaly.tank_capacity_liters, baseline_l_per_100km: anomaly.baseline_l_per_100km, assigned_driver: { name: anomaly.assigned_driver, context_only: true } },
-      gps_summary: { sample_count: gps.length, points: sample(gps, 24) },
+      gps_summary: gpsSummary,
       tank_readings: sample(tankReadings, 32),
       nearby_transactions: transactions,
     };
