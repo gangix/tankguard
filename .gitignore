@@ -43,3 +43,6 @@ next-env.d.ts
 # Local seed artifacts
 data/tankguard.db
 data/ground_truth.json
+
+.idea/
+*.iml
